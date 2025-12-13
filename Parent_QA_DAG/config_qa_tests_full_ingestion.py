@@ -83,7 +83,7 @@ def write_report(**context):
         print(f"BQ insert skipped: {e}")
 
 with DAG(
-    dag_id=Variable.get("qa_dag_id"),
+    dag_id=Variable.get("qa_dag_id_full_ingestion"),
     start_date=datetime(2024, 1, 1),
     schedule_interval=None,
     catchup=False,
