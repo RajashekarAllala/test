@@ -1,0 +1,55 @@
+{
+  /* ================================
+     GCP / Composer
+     ================================ */
+  "gcp_project_id": "ap-bld-01",
+  "gcp_conn_id": "google_cloud_default",
+  "bq_location": "EU",
+
+  /* ================================
+     CONFIG TABLE (Controls WHAT runs)
+     ================================ */
+  "config_dataset_name": "odp_config",
+  "config_table_name": "ingestion_config",
+
+  /* ================================
+     STAGING & TARGET DATASETS
+     ================================ */
+  "staging_dataset_name": "odp_staging",
+
+  "target_reload_dataset": "odp_target_reload",
+  "target_cdc_dataset": "odp_target_cdc",
+
+  /* ================================
+     DQ CONFIG (Rules)
+     ================================ */
+  "dq_config_bucket": "ap-bld-01-dq-config",
+  "dq_config_object": "dq_rules.json",
+
+  /* ================================
+     ARCHIVAL
+     ================================ */
+  "archival_bucket": "ap-bld-01-archive",
+  "archival_path": "odp/archive",
+
+  /* ================================
+     AUDIT (Ingestion-level)
+     ================================ */
+  "audit_dataset": "qa_audit",
+  "audit_table": "ingestion_execution_log",
+
+  /* ================================
+     QA DAG (Post-ingestion)
+     ================================ */
+  "qa_dag_id": "config_qa_tests_with_exceptions",
+
+  /* ================================
+     QA OUTPUT / REPORTING
+     ================================ */
+  "qa_bq_project": "ap-bld-01",
+  "qa_bq_dataset": "qa_audit",
+  "qa_bq_table": "qa_execution_log",
+
+  "test_report_bucket": "ap-bld-01-stb-euwe2-loans",
+  "test_report_folder": "test_report_folder"
+}
