@@ -6,7 +6,7 @@ from datetime import datetime
 import json
 
 with DAG(
-    dag_id="config_qa_tests_full_ingestion",
+    dag_id=Variable.get("qa_dag_id_parent"),
     start_date=datetime(2025, 1, 1),
     schedule_interval=None,
     catchup=False,
