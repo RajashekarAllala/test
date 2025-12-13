@@ -24,7 +24,7 @@ from google.cloud import storage
 
 # ---------------- DAG-LEVEL VALIDATION ----------------
 REQUIRED_VARS = [
-    "ingestion_dag_order", "qa_dag_id",
+    "ingestion_dag_order", "qa_dag_id_full_ingestion",
     "test_report_bucket", "test_report_folder",
     "composer_log_bucket",
     "parent_dag_timeout_minutes",
@@ -38,7 +38,7 @@ if missing:
     raise RuntimeError(f"Missing Airflow Variables: {missing}")
 
 DAG_ORDER = Variable.get("ingestion_dag_order", deserialize_json=True)
-QA_DAG_ID = Variable.get("qa_dag_id")
+QA_DAG_ID = Variable.get("qa_dag_id_full_ingestion")
 LOG_BUCKET = Variable.get("composer_log_bucket")
 
 PER_DAG_TIMEOUTS = Variable.get("per_dag_timeout_minutes", deserialize_json=True)
@@ -205,7 +205,7 @@ with DAG(
 
     run_qa = TriggerDagRunOperator(
         task_id="run_qa",
-        trigger_dag_id=QA_DAG_ID,
+        trigger_dag_id=,
         conf="{{ ti.xcom_pull(task_ids='prepare_qa_conf', key='qa_conf') }}",
         wait_for_completion=True
     )
