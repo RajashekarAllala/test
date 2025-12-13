@@ -1,0 +1,36 @@
+{
+  "test_report_bucket": "ap-bld-01-stb-euwe2-loans",
+  "test_report_folder": "test_report_folder",
+
+  "audit_dataset": "odp_dataset",
+
+  "ingestion_dags": [
+    "odp_temp_footer_validation_string",
+    "odp_target_load_reload",
+    "load_odp_ODP_TEST_RELOAD"
+  ],
+
+  "ingestion_dag_order": [
+    "odp_temp_footer_validation_string",
+    "odp_target_load_reload",
+    "load_odp_ODP_TEST_RELOAD"
+  ],
+
+  "qa_dag_id": "config_qa_tests_with_exceptions",
+
+  "composer_log_bucket": "europe-west2-my-composer-env-bucket",
+
+  "parent_dag_timeout_minutes": 120,
+  "parent_task_timeout_minutes": 30,
+  "parent_sla_minutes": 60,
+
+  "per_dag_timeout_minutes": {
+    "odp_temp_footer_validation_string": 10,
+    "odp_target_load_reload": 45,
+    "load_odp_ODP_TEST_RELOAD": 30
+  },
+
+  "qa_bq_project": "ap-bld-01",
+  "qa_bq_dataset": "qa_audit",
+  "qa_bq_table": "qa_execution_log"
+}
