@@ -1,62 +1,30 @@
 """
 QA DAG
-======
-
-- Reads dag_run.conf
-- Validates structure
-- Writes:
-  - detailed JSON
-  - CSV
-  - latest_qa_summary.json
-- NEVER fails
+------
+• Reads dag_run.conf
+• Writes JSON, CSV, latest summary
+• Uses Airflow Variables only
+• NEVER fails
 """
 
 from datetime import datetime
 import json, csv, io
-
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models import Variable
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 
-DEFAULT_ARGS = {
-    "owner": "qa",
-    "depends_on_past": False,
-    "retries": 0
-}
-
-
-def validate_conf(conf):
-    errors = []
-    if not isinstance(conf, dict):
-        return ["dag_run.conf missing or invalid"], []
-
-    child_runs = conf.get("child_runs")
-    if not isinstance(child_runs, list):
-        return ["child_runs missing or invalid"], []
-
-    for i, cr in enumerate(child_runs):
-        if "dag_id" not in cr:
-            errors.append(f"child_runs[{i}] missing dag_id")
-        if "state" not in cr:
-            errors.append(f"child_runs[{i}] missing state")
-
-    return errors, child_runs
+DEFAULT_ARGS = {"owner": "qa", "retries": 0, "depends_on_past": False}
 
 
 def write_report(**context):
-    dag_run = context["dag_run"]
-    conf = dag_run.conf or {}
+    conf = context["dag_run"].conf or {}
 
-    errors, child_runs = validate_conf(conf)
-
-    bucket = "ap-bld-01-stb-euwe2-loans"
+    bucket = Variable.get("test_report_bucket")
     folder = Variable.get("test_report_folder")
 
-    failed = bool(errors)
-    for cr in child_runs:
-        if cr.get("state", "").lower() != "success":
-            failed = True
+    child_runs = conf.get("child_runs", [])
+    failed = any(c.get("state") != "success" for c in child_runs)
 
     status = "FAIL" if failed else "PASS"
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -64,7 +32,6 @@ def write_report(**context):
     detailed = {
         "run_ts": ts,
         "status": status,
-        "dq_conf_errors": errors,
         "child_run_statuses": child_runs
     }
 
@@ -72,11 +39,8 @@ def write_report(**context):
         "run_ts": ts,
         "status": status,
         "dags": [
-            {
-                "dag_id": c.get("dag_id"),
-                "state": c.get("state"),
-                "failed_tasks": len(c.get("failed_tasks", []))
-            } for c in child_runs
+            {"dag_id": c["dag_id"], "state": c["state"]}
+            for c in child_runs
         ]
     }
 
@@ -93,7 +57,7 @@ def write_report(**context):
 
 
 with DAG(
-    dag_id="config_qa_tests_with_exceptions",
+    dag_id=Variable.get("qa_dag_id"),
     start_date=datetime(2024, 1, 1),
     schedule_interval=None,
     catchup=False,
