@@ -9,7 +9,7 @@ FINAL PARENT DAG
 • Trigger QA DAG once
 • Fail parent ONLY after QA finishes
 """
-
+# Composer logs bucket: GCP Console → Cloud Storage → Buckets OR Composer → Environment details → GCS bucket
 import re
 from datetime import datetime, timedelta
 from airflow import DAG
