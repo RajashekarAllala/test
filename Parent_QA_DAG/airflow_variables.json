@@ -16,7 +16,7 @@
     "load_odp_ODP_TEST_RELOAD"
   ],
 
-  "qa_dag_id": "config_qa_tests_full_ingestion",
+  "qa_dag_id_full_ingestion": "config_qa_tests_full_ingestion",
 
   "composer_log_bucket": "europe-west2-my-composer-env-bucket",
 
