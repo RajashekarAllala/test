@@ -6,7 +6,7 @@ from datetime import datetime
 import json
 
 with DAG(
-    dag_id="config_qa_tests_with_exceptions",
+    dag_id=Variable.get("qa_dag_id"),
     start_date=datetime(2025, 1, 1),
     schedule_interval=None,
     catchup=False,
