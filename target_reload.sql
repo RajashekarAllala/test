@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS `{{project_id}}.{{target_reload_dataset}}.target_relo
   rec_load_ts       TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
   as_of_date_time   TIMESTAMP NOT NULL,
   row_hash          STRING,
-  record_check_ts   TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+  record_check_ts   TIMESTAMP
 );
