@@ -2,6 +2,6 @@
   "test_report_bucket": "ap-bld-01-stb-euwe2-loans",
   "test_report_folder": "test_report_folder",
   "audit_dataset": "odp_dataset",
-  "qa_dag_id_parent": "config_qa_tests_dag",
+  "qa_dag_id_parent": "config_qa_tests_parent_dag",
   "composer_log_bucket": "europe-west2-my-composer-env-bucket"
 }
