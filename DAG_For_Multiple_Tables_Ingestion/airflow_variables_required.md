@@ -54,6 +54,7 @@
 
 1️⃣ Ingestion DAG (odp_multi_table_ingestion.py)
 
+------------------------------------------------------------------
 | Variable                | Used for                             |
 | ----------------------- | ------------------------------------ |
 | `gcp_conn_id`           | Airflow → GCP connection             |
@@ -69,10 +70,11 @@
 | `archival_bucket`       | Archive GCS bucket                   |
 | `archival_path`         | Archive folder path                  |
 | `qa_dag_id`             | QA DAG trigger ID                    |
-
+------------------------------------------------------------------
 
 2️⃣ QA DAG (config_qa_tests_with_exceptions.py)
 
+----------------------------------------------------------------
 | Variable              | Used for                             |
 | --------------------- | ------------------------------------ |
 | `gcp_conn_id`         | BigQuery and GCS access              |
@@ -87,10 +89,11 @@
 | `qa_bq_table`         | QA results table                     |
 | `test_report_bucket`  | QA report GCS bucket                 |
 | `test_report_folder`  | QA report folder path                |
-
+----------------------------------------------------------------
 
 3️⃣ myAudit.py
 
+---------------------------------------------------------
 | Variable              | Used for                      |
 | --------------------- | ----------------------------- |
 | `gcp_conn_id`         | BigQuery write access         |
@@ -98,3 +101,4 @@
 | `gcp_project_id`      | Audit table project           |
 | `audit_dataset`       | Audit dataset                 |
 | `audit_table`         | Audit table                   |
+---------------------------------------------------------
