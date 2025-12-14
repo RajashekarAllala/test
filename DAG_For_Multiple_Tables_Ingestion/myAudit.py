@@ -1,134 +1,71 @@
 from airflow.models import Variable
-from google.cloud import bigquery
+from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 from datetime import datetime
 
-# --------------------------------------------------
-# BigQuery client
-# --------------------------------------------------
-def get_bq_client():
-    return bigquery.Client(project=Variable.get("gcp_project_id"))
+# ======================================================
+# Airflow Variables
+# ======================================================
+GCP_CONN_ID = Variable.get("gcp_conn_id")
+IMPERSONATION_CHAIN = Variable.get("impersonation_chain")
 
-# --------------------------------------------------
-# Generic COUNT helper
-# --------------------------------------------------
-def get_count(table_fq, where_clause=None):
-    client = get_bq_client()
-    sql = f"SELECT COUNT(*) cnt FROM `{table_fq}`"
-    if where_clause:
-        sql += f" WHERE {where_clause}"
-    return list(client.query(sql).result())[0].cnt
+PROJECT_ID = Variable.get("gcp_project_id")
+AUDIT_DATASET = Variable.get("audit_dataset")
+AUDIT_TABLE = Variable.get("audit_table")
 
-# --------------------------------------------------
-# SCD-2 reconciliation metrics
-# --------------------------------------------------
-def scd2_metrics(cfg):
-    client = get_bq_client()
+# ======================================================
+# BigQuery Hook (with impersonation)
+# ======================================================
+def _bq():
+    return BigQueryHook(
+        gcp_conn_id=GCP_CONN_ID,
+        impersonation_chain=IMPERSONATION_CHAIN
+    )
 
-    stg = cfg["stg_table"]
-    tgt = cfg["target_table"]
-    pk = cfg["pk_cols"][0]   # single PK (extendable)
+# ======================================================
+# Audit Writer
+# ======================================================
+def write_audit(
+    dag_name: str,
+    table_name: str,
+    task_id: str,
+    task_name: str,
+    task_start_datetime: datetime,
+    task_end_datetime: datetime,
+    task_status: str,
+    source_count: int = None,
+    target_count: int = None,
+    error_message: str = None
+):
+    """
+    Writes one audit record per logical task execution.
 
-    staging_count = get_count(stg)
-
-    new_sql = f"""
-    SELECT COUNT(*) cnt
-    FROM `{stg}` S
-    LEFT JOIN `{tgt}` T
-      ON S.{pk} = T.{pk}
-     AND T.is_current = TRUE
-    WHERE T.{pk} IS NULL
+    - Duration is derived, never passed
+    - audit_status is derived from task_status
+    - Safe for SUCCESS / FAILED paths
     """
 
-    unchanged_sql = f"""
-    SELECT COUNT(*) cnt
-    FROM `{stg}` S
-    JOIN `{tgt}` T
-      ON S.{pk} = T.{pk}
-     AND T.is_current = TRUE
-     AND T.row_hash = S.row_hash
-    """
+    duration_seconds = int(
+        (task_end_datetime - task_start_datetime).total_seconds()
+    )
 
-    changed_sql = f"""
-    SELECT COUNT(*) cnt
-    FROM `{stg}` S
-    JOIN `{tgt}` T
-      ON S.{pk} = T.{pk}
-     AND T.is_current = TRUE
-     AND T.row_hash != S.row_hash
-    """
+    audit_status = "PASS" if task_status == "SUCCESS" else "FAIL"
 
-    new_cnt = list(client.query(new_sql).result())[0].cnt
-    unchanged_cnt = list(client.query(unchanged_sql).result())[0].cnt
-    changed_cnt = list(client.query(changed_sql).result())[0].cnt
-
-    reconciled = new_cnt + unchanged_cnt + changed_cnt
-
-    return {
-        "staging_count": staging_count,
-        "new_records": new_cnt,
-        "unchanged_records": unchanged_cnt,
-        "changed_records": changed_cnt,
-        "audit_status": "PASS" if reconciled == staging_count else "FAIL",
-    }
-
-# --------------------------------------------------
-# Pipeline-level audit
-# --------------------------------------------------
-def write_pipeline_audit(cfg, dag_run, dag):
-    client = get_bq_client()
-
-    audit_project = Variable.get("gcp_project_id")
-    audit_dataset = Variable.get("audit_dataset")
-    audit_table = Variable.get("audit_table")
-
-    load_type = cfg["load_type"].upper()
-    staging_count = get_count(cfg["stg_table"])
-
-    if load_type == "RELOAD":
-        target_count = get_count(cfg["target_table"])
-        mismatch = staging_count - target_count
-        audit_status = "PASS" if mismatch == 0 else "FAIL"
-        metrics = {}
-    else:
-        metrics = scd2_metrics(cfg)
-        audit_status = metrics["audit_status"]
-        target_count = get_count(cfg["target_table"], "is_current = TRUE")
-        mismatch = (
-            metrics["staging_count"]
-            - (
-                metrics["new_records"]
-                + metrics["unchanged_records"]
-                + metrics["changed_records"]
-            )
-        )
-
-    failed_tasks = [
-        t.task_id
-        for t in dag_run.get_task_instances()
-        if t.state == "failed"
-    ]
-
-    job_status = "FAILED" if failed_tasks else "SUCCESS"
-
-    record = {
-        "dag_name": dag.dag_id,
-        "run_id": dag_run.run_id,
-        "table_name": cfg["table_name"],
-        "load_type": load_type,
-        "job_start_time": dag_run.start_date,
-        "job_end_time": datetime.utcnow(),
-        "job_status": job_status,
-        "source_count": staging_count,
-        "target_count": target_count,
-        "mismatch": mismatch,
+    row = {
+        "dag_name": dag_name,
+        "table_name": table_name,
+        "task_id": task_id,
+        "task_name": task_name,
+        "task_start_datetime": task_start_datetime,
+        "task_end_datetime": task_end_datetime,
+        "duration_seconds": duration_seconds,
+        "task_status": task_status,
         "audit_status": audit_status,
-        "new_records": metrics.get("new_records"),
-        "unchanged_records": metrics.get("unchanged_records"),
-        "changed_records": metrics.get("changed_records"),
-        "created_timestamp": datetime.utcnow(),
+        "source_count": source_count,
+        "target_count": target_count,
+        "error_message": error_message
     }
 
-    client.insert_rows_json(
-        f"{audit_project}.{audit_dataset}.{audit_table}",
-        [record],
+    _bq().insert_rows(
+        table=f"{PROJECT_ID}.{AUDIT_DATASET}.{AUDIT_TABLE}",
+        rows=[row]
     )
