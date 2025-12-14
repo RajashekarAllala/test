@@ -37,7 +37,8 @@ def run_qa(**context):
 
     bq = BigQueryHook(
         gcp_conn_id=GCP_CONN_ID,
-        impersonation_chain=IMPERSONATION_CHAIN
+        impersonation_chain=IMPERSONATION_CHAIN,
+        use_legacy_sql=False
     )
 
     gcs = GCSHook(
@@ -187,9 +188,9 @@ def run_qa(**context):
             "failure_reason": r[7]
         })
 
-    bq.insert_rows(
+    bq.insert_rows_json(
         table=f"{QA_PROJECT}.{QA_DATASET}.{QA_TABLE}",
-        rows=qa_dict_rows
+        json_rows=qa_dict_rows
     )
 
     # -------------------------------------------------
