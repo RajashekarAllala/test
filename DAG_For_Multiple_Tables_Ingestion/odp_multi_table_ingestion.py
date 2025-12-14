@@ -10,8 +10,15 @@ from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from datetime import datetime
 import json
 import re
+from pathlib import Path
+import sys
 
-from myAudit import write_audit
+DAG_DIR = str(Path(__file__).resolve().parent)
+
+if DAG_DIR not in sys.path:
+    sys.path.insert(0, DAG_DIR)
+
+from reusable_fiwcon_templates.myAudit import write_audit
 
 # =====================================================
 # Airflow Variables
