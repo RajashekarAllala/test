@@ -1,165 +1,407 @@
 from airflow import DAG
-from airflow.models import Variable
 from airflow.decorators import task
-from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
-from airflow.providers.google.cloud.transfers.gcs_to_gcs import GCSToGCSOperator
-from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
-from airflow.providers.google.cloud.hooks.gcs import GCSHook
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.models import Variable
 from airflow.exceptions import AirflowFailException
-from datetime import datetime, timedelta
-import json, re
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
-from reusable_templates.myAudit import (
-    get_bq_client,
-    get_count,
-    write_pipeline_audit,
-)
+from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+from airflow.providers.google.cloud.hooks.gcs import GCSHook
 
+from datetime import datetime
+import json
+import re
+
+from myAudit import write_audit
+
+# =====================================================
+# Airflow Variables
+# =====================================================
+GCP_CONN_ID = Variable.get("gcp_conn_id")
+IMPERSONATION_CHAIN = Variable.get("impersonation_chain")
+
+PROJECT_ID = Variable.get("gcp_project_id")
+
+CONFIG_DATASET = Variable.get("config_dataset_name")
+CONFIG_TABLE = Variable.get("config_table_name")
+
+STAGING_DATASET = Variable.get("staging_dataset_name")
+TARGET_RELOAD_DATASET = Variable.get("target_reload_dataset")
+TARGET_CDC_DATASET = Variable.get("target_cdc_dataset")
+
+DQ_BUCKET = Variable.get("dq_config_bucket")
+DQ_OBJECT = Variable.get("dq_config_object")
+
+ARCHIVE_BUCKET = Variable.get("archival_bucket")
+ARCHIVE_PATH = Variable.get("archival_path")
+
+QA_DAG_ID = Variable.get("qa_dag_id")
+
+# =====================================================
+# Hooks
+# =====================================================
+def bq():
+    return BigQueryHook(
+        gcp_conn_id=GCP_CONN_ID,
+        impersonation_chain=IMPERSONATION_CHAIN
+    )
+
+def gcs():
+    return GCSHook(
+        gcp_conn_id=GCP_CONN_ID,
+        impersonation_chain=IMPERSONATION_CHAIN
+    )
+
+# =====================================================
+# DAG
+# =====================================================
 with DAG(
     dag_id="odp_multi_table_ingestion",
     start_date=datetime(2025, 1, 1),
     schedule_interval=None,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(minutes=120),
-    tags=["odp", "multi_table"],
+    tags=["odp", "ingestion"]
 ) as dag:
 
-    # --------------------------------------------------
-    # Variables
-    # --------------------------------------------------
-    PROJECT_ID = Variable.get("gcp_project_id")
-    GCP_CONN_ID = Variable.get("gcp_conn_id")
-    BQ_LOCATION = Variable.get("bq_location")
-
-    CONFIG_DATASET = Variable.get("config_dataset_name")
-    CONFIG_TABLE = Variable.get("config_table_name")
-    STAGING_DATASET = Variable.get("staging_dataset_name")
-
-    TARGET_RELOAD_DATASET = Variable.get("target_reload_dataset")
-    TARGET_CDC_DATASET = Variable.get("target_cdc_dataset")
-
-    DQ_BUCKET = Variable.get("dq_config_bucket")
-    DQ_OBJECT = Variable.get("dq_config_object")
-
-    ARCHIVAL_BUCKET = Variable.get("archival_bucket")
-    ARCHIVAL_PATH = Variable.get("archival_path")
-
-    QA_DAG_ID = Variable.get("qa_dag_id")
-
-    CONFIG_TABLE_FQ = f"{PROJECT_ID}.{CONFIG_DATASET}.{CONFIG_TABLE}"
-
-    # --------------------------------------------------
-    # 1️⃣ Get active tables
-    # --------------------------------------------------
+    # =================================================
+    # 1. Read ACTIVE config rows
+    # =================================================
     @task
-    def get_active_tables():
-        client = get_bq_client()
-        sql = f"""
-        SELECT *
-        FROM `{CONFIG_TABLE_FQ}`
-        WHERE is_active = TRUE
-        """
-        return [dict(r.items()) for r in client.query(sql).result()]
+    def read_config_table():
+        dag_name = dag.dag_id
+        t_start = datetime.utcnow()
 
-    # --------------------------------------------------
-    # 2️⃣ Per-table ingestion
-    # --------------------------------------------------
+        try:
+            rows = [
+                dict(r) for r in bq().get_records(
+                    f"""
+                    SELECT *
+                    FROM `{PROJECT_ID}.{CONFIG_DATASET}.{CONFIG_TABLE}`
+                    WHERE is_active = TRUE
+                    """
+                )
+            ]
+
+            if not rows:
+                raise AirflowFailException("No active rows found in config table")
+
+            write_audit(
+                dag_name, "ALL", "read_config_table",
+                "read_config_table",
+                t_start, datetime.utcnow(),
+                "SUCCESS",
+                source_count=len(rows)
+            )
+            return rows
+
+        except Exception as e:
+            write_audit(
+                dag_name, "ALL", "read_config_table",
+                "read_config_table",
+                t_start, datetime.utcnow(),
+                "FAILED",
+                error_message=str(e)
+            )
+            raise
+
+    # =================================================
+    # 2. Per-table ingestion
+    # =================================================
     @task
-    def ingest_one_table(cfg):
-        gcs = GCSHook(gcp_conn_id=GCP_CONN_ID)
-        client = get_bq_client()
+    def ingest_table(cfg: dict):
+        dag_name = dag.dag_id
+        table_name = cfg["table_name"]
+        load_type = cfg["load_type"].upper()
+        task_id = "ingest_table"
 
-        # ---- derive tables
-        cfg["stg_table"] = f"{PROJECT_ID}.{STAGING_DATASET}.{cfg['table_name']}_STG"
-        if cfg["load_type"].upper() == "RELOAD":
-            cfg["target_table"] = f"{PROJECT_ID}.{TARGET_RELOAD_DATASET}.{cfg['table_name']}"
-        else:
-            cfg["target_table"] = f"{PROJECT_ID}.{TARGET_CDC_DATASET}.{cfg['table_name']}"
+        stg_table = f"{PROJECT_ID}.{STAGING_DATASET}.{table_name}_STG"
+        job_start_ts = datetime.utcnow()
 
-        # ---- load DQ config
-        dq_all = json.loads(gcs.download(DQ_BUCKET, DQ_OBJECT))
-        dq_cfg = dq_all[cfg["stg_table"]]
-        cfg["pk_cols"] = dq_cfg["pk_cols"]
+        # -------------------------------------------------
+        # Load DQ config
+        # -------------------------------------------------
+        t_start = datetime.utcnow()
+        try:
+            dq_cfg = json.loads(
+                gcs().download(DQ_BUCKET, DQ_OBJECT).decode("utf-8")
+            )
 
-        # ---- footer validation
-        text = gcs.download(cfg["gcs_bucket"], cfg["file_name"]).decode()
-        footer = [l for l in text.splitlines() if l.strip()][-1]
-        match = re.search(dq_cfg["footer_line_regex"], footer, re.IGNORECASE)
-        if not match:
-            raise AirflowFailException(f"Footer validation failed for {cfg['table_name']}")
-        footer_count = int(match.group(1))
+            if stg_table not in dq_cfg:
+                raise AirflowFailException(f"DQ config missing for {stg_table}")
 
-        # ---- truncate staging
-        client.query(f"TRUNCATE TABLE `{cfg['stg_table']}`").result()
+            rules = dq_cfg[stg_table]
+            pk_cols = rules["pk_cols"]
+            not_null_cols = rules.get("not_null_cols", [])
 
-        # ---- load staging
-        GCSToBigQueryOperator(
-            task_id=f"load_stage_{cfg['table_name']}",
-            gcp_conn_id=GCP_CONN_ID,
-            project_id=PROJECT_ID,
-            bucket=cfg["gcs_bucket"],
-            source_objects=[cfg["file_name"]],
-            destination_project_dataset_table=cfg["stg_table"],
-            source_format=cfg["file_type"],
-            skip_leading_rows=1,
-            write_disposition="WRITE_TRUNCATE",
-        ).execute({})
+            write_audit(
+                dag_name, table_name, task_id,
+                "load_dq_config",
+                t_start, datetime.utcnow(), "SUCCESS"
+            )
+        except Exception as e:
+            write_audit(
+                dag_name, table_name, task_id,
+                "load_dq_config",
+                t_start, datetime.utcnow(),
+                "FAILED", error_message=str(e)
+            )
+            raise
 
-        # ---- count check
-        if get_count(cfg["stg_table"]) != footer_count:
-            raise AirflowFailException("Source vs staging count mismatch")
+        # -------------------------------------------------
+        # Footer validation (single GCS read)
+        # -------------------------------------------------
+        t_start = datetime.utcnow()
+        try:
+            content = gcs().download(
+                cfg["gcs_bucket"], cfg["file_name"]
+            ).decode("utf-8")
 
-        # ---- load target
-        pk = cfg["pk_cols"][0]
-        non_keys = [c for c in dq_cfg["not_null_cols"] if c != pk]
-        hash_expr = " || '|' || ".join([f"COALESCE(CAST({c} AS STRING),'')" for c in non_keys])
+            footer_line = content.strip().splitlines()[-1]
 
-        if cfg["load_type"].upper() == "RELOAD":
-            sql = f"""
-            CREATE OR REPLACE TABLE `{cfg['target_table']}` AS
-            SELECT *, TO_HEX(MD5({hash_expr})) row_hash,
-                   CURRENT_TIMESTAMP() record_check_ts
-            FROM `{cfg['stg_table']}`
-            """
-        else:
-            sql = f"""
-            MERGE `{cfg['target_table']}` T
-            USING (SELECT *, TO_HEX(MD5({hash_expr})) row_hash FROM `{cfg['stg_table']}`) S
-            ON T.{pk}=S.{pk} AND T.is_current=TRUE
-            WHEN MATCHED AND T.row_hash=S.row_hash THEN
-              UPDATE SET record_check_ts=CURRENT_TIMESTAMP()
-            WHEN MATCHED AND T.row_hash!=S.row_hash THEN
-              UPDATE SET is_current=FALSE, end_date=CURRENT_DATE()
-            WHEN NOT MATCHED THEN
-              INSERT ROW
-            """
-        client.query(sql).result()
+            match = re.search(
+                rules["footer_line_regex"],
+                footer_line,
+                re.IGNORECASE
+            )
 
-        # ---- audit
-        write_pipeline_audit(cfg, dag_run=dag.get_dagrun(), dag=dag)
+            if not match:
+                raise AirflowFailException("Footer regex did not match")
 
-        # ---- archive
-        gcs.copy(
-            cfg["gcs_bucket"],
-            cfg["file_name"],
-            ARCHIVAL_BUCKET,
-            f"{ARCHIVAL_PATH}/{cfg['table_name']}/{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-        )
-        gcs.delete(cfg["gcs_bucket"], cfg["file_name"])
+            footer_count = int(match.group(1))
 
-        return cfg["table_name"]
+            write_audit(
+                dag_name, table_name, task_id,
+                "validate_footer_and_get_count",
+                t_start, datetime.utcnow(), "SUCCESS"
+            )
+        except Exception as e:
+            write_audit(
+                dag_name, table_name, task_id,
+                "validate_footer_and_get_count",
+                t_start, datetime.utcnow(),
+                "FAILED", error_message=str(e)
+            )
+            raise
 
-    # --------------------------------------------------
-    # DAG wiring
-    # --------------------------------------------------
-    active_cfgs = get_active_tables()
-    ingest_one_table.expand(cfg=active_cfgs)
+        # -------------------------------------------------
+        # Load GCS → Staging
+        # -------------------------------------------------
+        t_start = datetime.utcnow()
+        try:
+            bq().run_load(
+                destination_project_dataset_table=stg_table,
+                source_uris=[f"gs://{cfg['gcs_bucket']}/{cfg['file_name']}"],
+                source_format="CSV",
+                skip_leading_rows=1,
+                autodetect=True,
+                write_disposition="WRITE_TRUNCATE"
+            )
+
+            staging_count = bq().get_first(
+                f"SELECT COUNT(*) FROM `{stg_table}`"
+            )[0]
+
+            if staging_count != footer_count:
+                raise AirflowFailException(
+                    f"Footer={footer_count}, staging={staging_count}"
+                )
+
+            write_audit(
+                dag_name, table_name, task_id,
+                "load_gcs_to_staging",
+                t_start, datetime.utcnow(),
+                "SUCCESS",
+                source_count=footer_count,
+                target_count=staging_count
+            )
+        except Exception as e:
+            write_audit(
+                dag_name, table_name, task_id,
+                "load_gcs_to_staging",
+                t_start, datetime.utcnow(),
+                "FAILED", error_message=str(e)
+            )
+            raise
+
+        # -------------------------------------------------
+        # DQ checks
+        # -------------------------------------------------
+        t_start = datetime.utcnow()
+        try:
+            for col in not_null_cols:
+                cnt = bq().get_first(
+                    f"SELECT COUNT(*) FROM `{stg_table}` WHERE {col} IS NULL"
+                )[0]
+                if cnt > 0:
+                    raise AirflowFailException(f"NOT NULL failed: {col}")
+
+            pk_expr = ", ".join(pk_cols)
+            dupes = bq().get_first(
+                f"""
+                SELECT COUNT(*) FROM (
+                  SELECT {pk_expr}, COUNT(*) c
+                  FROM `{stg_table}`
+                  GROUP BY {pk_expr}
+                  HAVING c > 1
+                )
+                """
+            )[0]
+
+            if dupes > 0:
+                raise AirflowFailException("Duplicate primary keys detected")
+
+            write_audit(
+                dag_name, table_name, task_id,
+                "dq_checks",
+                t_start, datetime.utcnow(), "SUCCESS"
+            )
+        except Exception as e:
+            write_audit(
+                dag_name, table_name, task_id,
+                "dq_checks",
+                t_start, datetime.utcnow(),
+                "FAILED", error_message=str(e)
+            )
+            raise
+
+        # -------------------------------------------------
+        # Load to Target + Reconciliation
+        # -------------------------------------------------
+        t_start = datetime.utcnow()
+        try:
+            if load_type == "RELOAD":
+                target_table = f"{PROJECT_ID}.{TARGET_RELOAD_DATASET}.{table_name}"
+
+                bq().run(
+                    f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS
+                    SELECT *, CURRENT_TIMESTAMP() AS record_check_ts
+                    FROM `{stg_table}`
+                    """,
+                    use_legacy_sql=False
+                )
+
+                tgt_count = bq().get_first(
+                    f"SELECT COUNT(*) FROM `{target_table}`"
+                )[0]
+
+                if tgt_count != staging_count:
+                    raise AirflowFailException(
+                        f"RELOAD mismatch: staging={staging_count}, target={tgt_count}"
+                    )
+
+            else:
+                target_table = f"{PROJECT_ID}.{TARGET_CDC_DATASET}.{table_name}"
+                pk = pk_cols[0]
+
+                bq().run(
+                    f"""
+                    MERGE `{target_table}` T
+                    USING (
+                      SELECT
+                        S.*,
+                        TO_HEX(MD5(TO_JSON_STRING(S))) AS row_hash
+                      FROM `{stg_table}` S
+                    ) S
+                    ON T.{pk} = S.{pk}
+                    AND T.is_current = TRUE
+
+                    WHEN MATCHED AND T.row_hash = S.row_hash THEN
+                      UPDATE SET
+                        record_check_ts = CURRENT_TIMESTAMP()
+
+                    WHEN MATCHED AND T.row_hash != S.row_hash THEN
+                      UPDATE SET
+                        is_current = FALSE,
+                        end_date = CURRENT_DATE()
+
+                    WHEN NOT MATCHED THEN
+                      INSERT (
+                        {pk},
+                        row_hash,
+                        start_date,
+                        end_date,
+                        is_current,
+                        record_check_ts
+                      )
+                      VALUES (
+                        S.{pk},
+                        S.row_hash,
+                        CURRENT_DATE(),
+                        DATE '9999-12-31',
+                        TRUE,
+                        CURRENT_TIMESTAMP()
+                      )
+                    """,
+                    use_legacy_sql=False
+                )
+
+                touched = bq().get_first(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM `{target_table}`
+                    WHERE is_current = TRUE
+                      AND record_check_ts >= TIMESTAMP('{job_start_ts}')
+                    """
+                )[0]
+
+                if touched != staging_count:
+                    raise AirflowFailException(
+                        f"SCD2 mismatch: staging={staging_count}, touched={touched}"
+                    )
+
+            write_audit(
+                dag_name, table_name, task_id,
+                "load_to_target",
+                t_start, datetime.utcnow(),
+                "SUCCESS",
+                source_count=staging_count,
+                target_count=staging_count
+            )
+
+        except Exception as e:
+            write_audit(
+                dag_name, table_name, task_id,
+                "load_to_target",
+                t_start, datetime.utcnow(),
+                "FAILED", error_message=str(e)
+            )
+            raise
+
+        # -------------------------------------------------
+        # Archive file
+        # -------------------------------------------------
+        t_start = datetime.utcnow()
+        try:
+            archive_object = f"{ARCHIVE_PATH}/{cfg['file_name'].split('/')[-1]}"
+
+            gcs().copy(
+                cfg["gcs_bucket"],
+                cfg["file_name"],
+                ARCHIVE_BUCKET,
+                archive_object
+            )
+            gcs().delete(cfg["gcs_bucket"], cfg["file_name"])
+
+            write_audit(
+                dag_name, table_name, task_id,
+                "archive_file",
+                t_start, datetime.utcnow(), "SUCCESS"
+            )
+        except Exception as e:
+            write_audit(
+                dag_name, table_name, task_id,
+                "archive_file",
+                t_start, datetime.utcnow(),
+                "FAILED", error_message=str(e)
+            )
+            raise
+
+    cfgs = read_config_table()
+    ingest_table.expand(cfg=cfgs)
 
     TriggerDagRunOperator(
         task_id="trigger_qa_dag",
         trigger_dag_id=QA_DAG_ID,
-        trigger_rule=TriggerRule.ALL_DONE,
+        trigger_rule="all_done"
     )
