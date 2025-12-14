@@ -1,5 +1,5 @@
 -- DDL
-CREATE TABLE IF NOT EXISTS `{{project_id}}.{{config_dataset}}.ingestion_config` (
+CREATE TABLE IF NOT EXISTS `<Project_ID>.<DataSet>.ingestion_config` (
   table_name        STRING NOT NULL,     -- Logical table name (ODP_ACCOUNTS)
   category          STRING,              -- Optional grouping
   source_system     STRING NOT NULL,     -- Source identifier
