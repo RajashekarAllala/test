@@ -17,8 +17,7 @@ CREATE TABLE IF NOT EXISTS `{{project_id}}.{{config_dataset}}.ingestion_config` 
 PARTITION BY DATE(created_ts)
 CLUSTER BY table_name, load_type;
 
----
-Basic INSERT (RELOAD example)
+--- Basic INSERT (RELOAD example)
 
 INSERT INTO `ap-bld-01.odp_dataset.ingestion_config`
 (
@@ -49,8 +48,7 @@ VALUES
   'airflow'
 );
 
----
-INSERT for INCREMENTAL (SCD Type-2)
+--- INSERT for INCREMENTAL (SCD Type-2)
 
 INSERT INTO `ap-bld-01.odp_dataset.ingestion_config`
 (
@@ -81,10 +79,8 @@ VALUES
   'airflow'
 );
 
----
-INSERT with custom SQL override (advanced)
-
-Use this only if you want to override default load behavior.
+--- INSERT with custom SQL override (advanced)
+--- Use this only if you want to override default load behavior.
 
 INSERT INTO `ap-bld-01.odp_dataset.ingestion_config`
 (
@@ -121,8 +117,7 @@ VALUES
   'airflow'
 );
 
----
-Insert multiple tables at once (recommended)
+--- Insert multiple tables at once (recommended)
 
 INSERT INTO `ap-bld-01.odp_dataset.ingestion_config`
 (
@@ -151,11 +146,8 @@ VALUES
  'CSV', 'INCREMENTAL',
  NULL, NULL, TRUE, 'airflow');
 
----
-
-Important validation checks (before running DAG)
-
-Run these once after insert:
+--- Important validation checks (before running DAG)
+--- Run these once after insert:
 
 -- Check active tables
 SELECT table_name, load_type
