@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS `<Project_ID>.<DataSet>.ODP_ACCOUNTS` (
+CREATE TABLE IF NOT EXISTS `<Project_ID>.<DataSet>.ODP_ACCOUNTS_RELOAD` (
   account_id        STRING NOT NULL,
   balance           NUMERIC NOT NULL,
   as_of_date        DATE NOT NULL,
