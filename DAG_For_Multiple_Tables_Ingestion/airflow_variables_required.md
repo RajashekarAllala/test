@@ -1,56 +1,37 @@
+## ⚙️ airflow_variables.json
+
+```json
 {
-  /* ================================
-     GCP / Composer
-     ================================ */
   "gcp_conn_id": "google_cloud_default",
   "impersonation_chain": "data-access-sa@data-project.iam.gserviceaccount.com",
   "gcp_project_id": "ap-bld-01",
 
-  /* ================================
-     Config Table (Control Plane)
-     ================================ */
   "config_dataset_name": "odp_dataset",
   "config_table_name": "odp_ingestion_config",
 
-  /* ================================
-     Staging & Target Datasets
-     ================================ */
   "staging_dataset_name": "ODP_STAGING",
   "target_reload_dataset": "ODP_TARGET_RELOAD",
   "target_cdc_dataset": "ODP_TARGET_CDC",
 
-  /* ================================
-     DQ Configuration
-     ================================ */
   "dq_config_bucket": "ap-bld-01-dq-config",
   "dq_config_object": "dq_rules/odp_dq_rules.json",
 
-  /* ================================
-     Archive Configuration
-     ================================ */
   "archival_bucket": "ap-bld-01-archive",
   "archival_path": "odp/archive",
 
-  /* ================================
-     Audit Configuration
-     ================================ */
   "audit_dataset": "qa_audit",
   "audit_table": "ingestion_audit_log",
 
-  /* ================================
-     QA Configuration
-     ================================ */
   "qa_dag_id": "config_qa_tests_with_exceptions",
   "qa_bq_project": "ap-bld-01",
   "qa_bq_dataset": "qa_audit",
   "qa_bq_table": "qa_execution_log",
 
-  /* ================================
-     QA Report Output (GCS)
-     ================================ */
   "test_report_bucket": "ap-bld-01-stb-euwe2-loans",
   "test_report_folder": "test_report_folder"
 }
+
+```
 
 1️⃣ Ingestion DAG (odp_multi_table_ingestion.py)
 
