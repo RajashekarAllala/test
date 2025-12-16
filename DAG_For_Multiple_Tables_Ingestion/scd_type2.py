@@ -1,125 +1,114 @@
-expire_changed_current = f"""
-MERGE `{gcp_project_id}.{target_cdc_dataset}.{table_name}_CDC` T
-USING (
-  SELECT
-    account_id,
-    TO_HEX(
-      MD5(
-        CONCAT(
-          CAST(account_id AS STRING), '|',
-          CAST(balance AS STRING), '|',
-          CAST(as_of_date AS STRING)
-        )
-      )
-    ) AS src_row_hash
-  FROM `{gcp_project_id}.{staging_dataset_name}.{table_name}_STG`
-) S
-ON T.account_id = S.account_id
-AND T.is_current = TRUE
+def build_scd2_merge_sql(
+    staging_table: str,
+    target_table: str,
+    primary_keys: list,
+    business_keys: list,
+    non_business_keys: list = None
+):
+    
+    # ----------------------------
+    # Validation
+    # ----------------------------
+    if not primary_keys:
+        raise ValueError("primary_keys must not be empty")
 
-WHEN MATCHED
-AND T.row_hash != S.src_row_hash
-THEN UPDATE SET
-  is_current      = FALSE,
-  end_date        = CURRENT_DATE(),
-  record_check_ts = CURRENT_TIMESTAMP();
-"""
+    if not business_keys:
+        raise ValueError("business_keys must not be empty")
 
-new_changed_records = f"""
-INSERT INTO `{gcp_project_id}.{target_cdc_dataset}.{table_name}_CDC` (
-  account_id,
-  balance,
-  as_of_date,
-  row_hash,
-  is_current,
-  start_date,
-  end_date,
-  record_check_ts
-)
-SELECT
-  S.account_id,
-  S.balance,
-  S.as_of_date,
-  TO_HEX(
-    MD5(
-      CONCAT(
-        CAST(S.account_id AS STRING), '|',
-        CAST(S.balance AS STRING), '|',
-        CAST(S.as_of_date AS STRING)
-      )
-    )
-  ) AS row_hash,
-  TRUE                AS is_current,
-  CURRENT_DATE()      AS start_date,
-  NULL                AS end_date,
-  CURRENT_TIMESTAMP() AS record_check_ts
-FROM `{gcp_project_id}.{staging_dataset_name}.{table_name}_STG` S
-LEFT JOIN `{gcp_project_id}.{target_cdc_dataset}.{table_name}_CDC` T
-  ON S.account_id = T.account_id
- AND T.is_current = TRUE
-WHERE
-  T.account_id IS NULL
-  OR T.row_hash != TO_HEX(
-        MD5(
-          CONCAT(
-            CAST(S.account_id AS STRING), '|',
-            CAST(S.balance AS STRING), '|',
-            CAST(S.as_of_date AS STRING)
-          )
-        )
-      );
-"""
+    non_business_keys = non_business_keys or []
 
-current_unchanged = f"""
-UPDATE `{gcp_project_id}.{target_cdc_dataset}.{table_name}_CDC` T
-SET record_check_ts = CURRENT_TIMESTAMP()
-FROM `{gcp_project_id}.{staging_dataset_name}.{table_name}_STG` S
-WHERE
-  T.account_id = S.account_id
-  AND T.is_current = TRUE
-  AND T.row_hash = TO_HEX(
-        MD5(
-          CONCAT(
-            CAST(S.account_id AS STRING), '|',
-            CAST(S.balance AS STRING), '|',
-            CAST(S.as_of_date AS STRING)
-          )
-      ));
-"""
+    # ----------------------------
+    # Columns to SELECT / INSERT
+    # ----------------------------
+    # NOTE: primary_keys do NOT have to be part of business_keys
+    all_columns = primary_keys + business_keys + non_business_keys
 
-def run_scd2_merge(**context):
-    ti = context["ti"]
+    # remove duplicates while preserving order
+    seen = set()
+    all_columns = [c for c in all_columns if not (c in seen or seen.add(c))]
 
-    # Values already produced earlier in DAG
-    job_start_ts = ti.xcom_pull(key="job_start_ts")
-    table_name = ti.xcom_pull(key="table_name")
+    select_expr = ",\n    ".join([f"S.{c}" for c in all_columns])
+    insert_cols = ", ".join(all_columns)
 
-    gcp_project_id = Variable.get("gcp_project_id")
-    staging_dataset_name = Variable.get("staging_dataset_name")
-    target_cdc_dataset = Variable.get("target_cdc_dataset")
-    gcp_conn_id = Variable.get("gcp_conn_id")
-    impersonation_chain = Variable.get("impersonation_chain")
-    bq_location = Variable.get("bq_location", default_var="EU")
+    # ----------------------------
+    # JOIN condition (supports composite PK)
+    # ----------------------------
+    pk_join_cond = " AND ".join([f"T.{pk} = S.{pk}" for pk in primary_keys])
 
-    bq_hook = BigQueryHook(
-        gcp_conn_id=gcp_conn_id,
-        impersonation_chain=impersonation_chain,
-        location=bq_location,
-        use_legacy_sql=False,
+    # ----------------------------
+    # HASH expression (BUSINESS KEYS ONLY)
+    # ----------------------------
+    hash_expr = (
+        "TO_HEX(MD5(CONCAT("
+        + ", '|', ".join([f"CAST(S.{c} AS STRING)" for c in business_keys])
+        + ")))"
     )
 
-    client = bq_hook.get_client(project_id=gcp_project_id)
+    # ============================================================
+    # STEP 1 — Expire CHANGED current rows
+    # ============================================================
+    expire_sql = f"""
+    MERGE `{target_table}` T
+    USING (
+      SELECT
+        {select_expr},
+        {hash_expr} AS src_row_hash
+      FROM `{staging_table}` S
+    ) S
+    ON {pk_join_cond}
+    AND T.is_current = TRUE
 
-    client.query(expire_changed_current).result()
-    client.query(new_changed_records).result()
-    client.query(current_unchanged).result()
+    WHEN MATCHED
+    AND T.row_hash != S.src_row_hash
+    THEN UPDATE SET
+      T.is_current = FALSE,
+      T.end_date = CURRENT_DATE(),
+      T.record_check_ts = CURRENT_TIMESTAMP()
+    """
 
--- Source count
-SELECT COUNT(*) AS staging_count
-FROM `{gcp_project_id}.{staging_dataset_name}.{table_name}_STG`;
+    # ============================================================
+    # STEP 2 — Insert NEW + CHANGED rows (new current records)
+    # ============================================================
+    insert_sql = f"""
+    INSERT INTO `{target_table}` (
+      {insert_cols},
+      start_date,
+      end_date,
+      is_current,
+      row_hash,
+      record_check_ts
+    )
+    SELECT
+      {select_expr},
+      CURRENT_DATE()      AS start_date,
+      NULL                AS end_date,
+      TRUE                AS is_current,
+      {hash_expr}         AS row_hash,
+      CURRENT_TIMESTAMP() AS record_check_ts
+    FROM `{staging_table}` S
+    LEFT JOIN `{target_table}` T
+      ON {pk_join_cond}
+     AND T.is_current = TRUE
+    WHERE
+      {" OR ".join([f"T.{pk} IS NULL" for pk in primary_keys])}
+      OR T.row_hash != {hash_expr}
+    """
 
--- Target touched rows (CURRENT only)
-SELECT COUNT(*) AS touched_current_rows
-FROM `{gcp_project_id}.{target_cdc_dataset}.{table_name}_CDC`
-WHERE is_current = TRUE
-  AND record_check_ts >= TIMESTAMP('{job_start_ts}');
+    # ============================================================
+    # STEP 3 — Touch UNCHANGED current rows (reconciliation)
+    # ============================================================
+    touch_sql = f"""
+    UPDATE `{target_table}` T
+    SET record_check_ts = CURRENT_TIMESTAMP()
+    FROM `{staging_table}` S
+    WHERE
+      {pk_join_cond}
+      AND T.is_current = TRUE
+      AND T.row_hash = {hash_expr}
+    """
+
+    return {
+        "expire_sql": expire_sql.strip(),
+        "insert_sql": insert_sql.strip(),
+        "touch_sql": touch_sql.strip(),
+    }
