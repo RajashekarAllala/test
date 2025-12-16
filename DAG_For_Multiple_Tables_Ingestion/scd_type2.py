@@ -112,3 +112,17 @@ def build_scd2_merge_sql(
         "insert_sql": insert_sql.strip(),
         "touch_sql": touch_sql.strip(),
     }
+    
+    
+Example
+sqls = build_scd2_merge_sql(
+    staging_table="ap-bld-01.ODP_STAGING.ODP_ACCOUNTS_STG",
+    target_table="ap-bld-01.ODP_TARGET_CDC.ODP_ACCOUNTS_CDC",
+    primary_keys=cfg["primary_keys"],
+    business_keys=cfg["business_keys"],
+    non_business_keys=cfg.get("non_business_keys", [])
+)
+
+bq_client.query(sqls["expire_sql"]).result()
+bq_client.query(sqls["insert_sql"]).result()
+bq_client.query(sqls["touch_sql"]).result()
